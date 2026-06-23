@@ -17,19 +17,19 @@ $Port      = 3002
 $AppName   = "rilm-ai"
 
 Write-Host ""
-Write-Host "=== Rilm AI — Deploy VPS === $VpsUser@$VpsIp" -ForegroundColor Cyan
+Write-Host "=== Rilm AI - Deploy VPS === $VpsUser@$VpsIp" -ForegroundColor Cyan
 Write-Host ""
 
 # 1. Verifier SSH
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    Write-Error "SSH non trouve. Active OpenSSH : Parametres > Applications > Fonctionnalites optionnelles."
+    Write-Host "ERREUR: SSH non trouve. Activer OpenSSH dans les parametres Windows." -ForegroundColor Red
     exit 1
 }
 
 # 2. Charger le .env
 $EnvFile = "$Root\.env"
 if (-not (Test-Path $EnvFile)) {
-    Write-Error ".env introuvable. Copier .env.example -> .env et renseigner les valeurs."
+    Write-Host "ERREUR: .env introuvable. Copier .env.example en .env et renseigner les valeurs." -ForegroundColor Red
     exit 1
 }
 
@@ -39,32 +39,28 @@ Get-Content $EnvFile | Where-Object { $_ -match "^\s*[^#].*=.*" } | ForEach-Obje
     $envVars[$parts[0].Trim()] = $parts[1].Trim()
 }
 
-$SupabaseUrl  = $envVars["VITE_SUPABASE_URL"]
-$SupabaseKey  = $envVars["VITE_SUPABASE_ANON_KEY"]
+$SupabaseUrl = $envVars["VITE_SUPABASE_URL"]
+$SupabaseKey = $envVars["VITE_SUPABASE_ANON_KEY"]
 
 if (-not $SupabaseUrl -or -not $SupabaseKey) {
-    Write-Error "VITE_SUPABASE_URL ou VITE_SUPABASE_ANON_KEY manquant dans .env"
+    Write-Host "ERREUR: VITE_SUPABASE_URL ou VITE_SUPABASE_ANON_KEY manquant dans .env" -ForegroundColor Red
     exit 1
 }
 
 # 3. Build image Docker
 if (-not $SkipBuild) {
     Write-Host "Build image Docker..." -ForegroundColor Yellow
-    docker build `
-        --build-arg "VITE_SUPABASE_URL=$SupabaseUrl" `
-        --build-arg "VITE_SUPABASE_ANON_KEY=$SupabaseKey" `
-        -t $ImageName `
-        "$Root"
-    if ($LASTEXITCODE -ne 0) { Write-Error "Build Docker echoue."; exit 1 }
+    docker build --build-arg "VITE_SUPABASE_URL=$SupabaseUrl" --build-arg "VITE_SUPABASE_ANON_KEY=$SupabaseKey" -t $ImageName "$Root"
+    if ($LASTEXITCODE -ne 0) { Write-Host "ERREUR: Build Docker echoue." -ForegroundColor Red; exit 1 }
 } else {
-    Write-Host "SkipBuild — utilisation image existante $ImageName" -ForegroundColor DarkYellow
+    Write-Host "SkipBuild - utilisation image existante $ImageName" -ForegroundColor DarkYellow
 }
 
 # 4. Export image en tar
 Write-Host "Export image en tar..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path "$Root\dist" | Out-Null
 docker save $ImageName -o $TarPath
-if ($LASTEXITCODE -ne 0) { Write-Error "Export tar echoue."; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Host "ERREUR: Export tar echoue." -ForegroundColor Red; exit 1 }
 
 $Size = [math]::Round((Get-Item $TarPath).Length / 1MB, 1)
 Write-Host "Image exportee : $TarPath ($Size MB)" -ForegroundColor DarkGray
@@ -75,38 +71,43 @@ ssh "$VpsUser@$VpsIp" "mkdir -p $RemoteDir"
 
 # 6. Transfert SCP
 Write-Host "Transfert SCP ($Size MB) vers $VpsIp..." -ForegroundColor Yellow
-scp "$TarPath" "${VpsUser}@${VpsIp}:$RemoteDir/rilm-ai.tar"
-if ($LASTEXITCODE -ne 0) { Write-Error "SCP echoue."; exit 1 }
+scp "$TarPath" "${VpsUser}@${VpsIp}:${RemoteDir}/rilm-ai.tar"
+if ($LASTEXITCODE -ne 0) { Write-Host "ERREUR: SCP echoue." -ForegroundColor Red; exit 1 }
 
-# 7. Deploiement sur le VPS
+# 7. Deploiement sur le VPS (single-quote here-string = pas d'expansion PS)
 Write-Host "Deploiement sur le VPS..." -ForegroundColor Yellow
 
-$deployScript = @"
+$remoteScript = @'
 set -e
-cd $RemoteDir
+REMOTE_DIR="$1"
+APP_NAME="$2"
+PORT="$3"
+IMAGE="$4"
 
-echo '--- Load image Docker ---'
+cd "$REMOTE_DIR"
+
+echo "--- Load image Docker ---"
 docker load -i rilm-ai.tar
 
-echo '--- Stop/remove ancien conteneur ---'
-docker rm -f $AppName 2>/dev/null || true
+echo "--- Stop/remove ancien conteneur ---"
+docker rm -f "$APP_NAME" 2>/dev/null || true
 
-echo '--- Demarrage conteneur port $Port ---'
+echo "--- Demarrage conteneur port $PORT ---"
 docker run -d \
-  --name $AppName \
+  --name "$APP_NAME" \
   --restart unless-stopped \
-  -p ${Port}:80 \
-  $ImageName
+  -p "$PORT:80" \
+  "$IMAGE"
 
-echo '--- Nettoyage tar ---'
+echo "--- Nettoyage tar ---"
 rm -f rilm-ai.tar
 
-echo '--- Verification ---'
-docker ps --filter "name=$AppName" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-"@
+echo "--- Verification ---"
+docker ps --filter "name=$APP_NAME" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+'@
 
-$deployScript | ssh "$VpsUser@$VpsIp" "bash -s"
-if ($LASTEXITCODE -ne 0) { Write-Error "Deploiement echoue."; exit 1 }
+$remoteScript | ssh "$VpsUser@$VpsIp" "bash -s -- $RemoteDir $AppName $Port $ImageName"
+if ($LASTEXITCODE -ne 0) { Write-Host "ERREUR: Deploiement echoue." -ForegroundColor Red; exit 1 }
 
 # 8. Nettoyage local
 Remove-Item $TarPath -Force
@@ -115,5 +116,6 @@ Write-Host ""
 Write-Host "Deploy termine !" -ForegroundColor Green
 Write-Host "  App : http://${VpsIp}:${Port}" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Logs : ssh $VpsUser@$VpsIp 'docker logs -f $AppName'" -ForegroundColor DarkGray
+Write-Host "Logs  : ssh $VpsUser@$VpsIp" -ForegroundColor DarkGray
+Write-Host "        docker logs -f $AppName" -ForegroundColor DarkGray
 Write-Host ""

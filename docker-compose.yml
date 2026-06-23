@@ -1,0 +1,11 @@
+services:
+  rilm-ai:
+    build:
+      context: .
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    image: rilm-ai:latest
+    ports:
+      - "3001:80"
+    restart: unless-stopped
